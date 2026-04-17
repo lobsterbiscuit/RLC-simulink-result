@@ -1,0 +1,96 @@
+% ============================================================
+% Mini-Project Part 2D: Sensitivity Study
+%
+% Hold radius r constant and vary ell/r = {1.5, 2, 3, 5, 10}
+%
+% For each ratio:
+% 1. Recompute N using the ideal model for Lcrit
+% 2. Compute Lwheeler
+% 3. Compute damping ratio zeta
+% 4. Plot zeta versus ell/r
+%
+% ============================================================
+
+clear; clc; close all;
+
+%% -------------------- Circuit Parameters --------------------
+R = 10;                  % Resistance [ohms]
+C = 100e-6;              % Capacitance [F]
+Lcrit = (R^2 * C)/4;     % Critical inductance [H]
+
+%% -------------------- Fixed Coil Radius ---------------------
+r_m = 0.02;              % Hold radius constant [m]
+mu0 = 4*pi*1e-7;         % Permeability of free space [H/m]
+m_to_in = 39.3701;       % meters to inches
+
+%% -------------------- Ratios to Study -----------------------
+ratio_list = [1.5, 2, 3, 5, 10];
+
+% Preallocate arrays
+ell_m_list = zeros(size(ratio_list));
+N_exact_list = zeros(size(ratio_list));
+N_int_list = zeros(size(ratio_list));
+Lideal_list = zeros(size(ratio_list));
+Lwheeler_uH_list = zeros(size(ratio_list));
+Lwheeler_H_list = zeros(size(ratio_list));
+zeta_list = zeros(size(ratio_list));
+
+%% -------------------- Loop Through Ratios -------------------
+for k = 1:length(ratio_list)
+
+    ratio = ratio_list(k);
+
+    % Coil length from chosen ratio
+    ell_m = ratio * r_m;
+    ell_m_list(k) = ell_m;
+
+    % Ideal solenoid area
+    A = pi * r_m^2;
+
+    % Recompute N using ideal model for Lcrit
+    N_exact = sqrt(Lcrit * ell_m / (mu0 * A));
+    N_int = round(N_exact);
+
+    N_exact_list(k) = N_exact;
+    N_int_list(k) = N_int;
+
+    % Recompute ideal inductance using integer turn count
+    Lideal = mu0 * N_int^2 * A / ell_m;
+    Lideal_list(k) = Lideal;
+
+    % Convert geometry to inches for Wheeler formula
+    r_in = r_m * m_to_in;
+    ell_in = ell_m * m_to_in;
+
+    % Wheeler short-coil inductance
+    Lwheeler_uH = (r_in^2 * N_int^2) / (9*r_in + 10*ell_in);
+    Lwheeler_H = Lwheeler_uH * 1e-6;
+
+    Lwheeler_uH_list(k) = Lwheeler_uH;
+    Lwheeler_H_list(k) = Lwheeler_H;
+
+    % Damping ratio using Wheeler inductance
+    zeta = (R/2) * sqrt(C / Lwheeler_H);
+    zeta_list(k) = zeta;
+end
+
+%% -------------------- Display Results -----------------------
+fprintf('--- Part 2D: Sensitivity Study ---\n');
+fprintf('Fixed radius r = %.4f m\n', r_m);
+fprintf('Critical inductance Lcrit = %.6f H\n\n', Lcrit);
+
+fprintf(' ratio    ell(m)    N_exact    N_int    Lwheeler(uH)    zeta\n');
+fprintf('---------------------------------------------------------------\n');
+for k = 1:length(ratio_list)
+    fprintf('%5.1f   %7.4f   %7.3f   %5d    %11.3f    %7.4f\n', ...
+        ratio_list(k), ell_m_list(k), N_exact_list(k), N_int_list(k), ...
+        Lwheeler_uH_list(k), zeta_list(k));
+end
+
+%% -------------------- Plot zeta vs ell/r --------------------
+figure;
+plot(ratio_list, zeta_list, '-o', 'LineWidth', 1.6, 'MarkerSize', 7);
+grid on;
+xlabel('l / r');
+ylabel('Damping Ratio \zeta');
+title('Sensitivity Study: \zeta versus l/r');
