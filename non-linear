@@ -1,0 +1,147 @@
+%% =========================================================================
+% nonlinear_inductor_part4.m
+%
+% ECE 53324332 Modeling and Simulation Mini-Project - Part 4
+% Nonlinear Inductor Modeling with Magnetic Core
+%
+% This script models a series RLC circuit with a nonlinear saturating
+% inductor:
+%
+%   L(i) = L0 * [1 - alpha * tanh(i/Isat)^2]
+%
+% State equations:
+%   di/dt  = (V - R*i - vC) / [L(i) + i*(dL/di)]
+%   dvC/dt = i / C
+%
+%% =========================================================================
+
+clear; clc; close all;
+
+% SECTION 1 - Circuit PARAMETERS
+
+
+R     = 10;                % Resistance (Ohms)
+C     = 100e-6;            % Capacitance (F) per req
+L0    = 0.7311e-6;         % Small-signal inductance (H) = 0.7311 uH from part3 
+alpha = 0.7;               % Nonlinearity strength
+Isat  = 0.5;               % Saturation current (A)
+
+Vstep = 10;                 % Input step voltage (V)
+tspan = [0 20e-6];         % Simulation time (s)
+x0    = [0; 0];            % Initial conditions: [i(0); vC(0)]
+
+% SECTION 2 - SOLVE Nonlinear Inductor Model ODE
+
+[t_nl, x_nl] = ode45(@(t,x) nonlinear_rlc_ode(t, x, R, C, L0, alpha, Isat, Vstep), tspan, x0);
+
+i_nl  = x_nl(:,1);
+vC_nl = x_nl(:,2);
+
+% SECTION 3 - COMPUTE L(i) FOR NONLINEAR CASE
+
+L_nl = L0 * (1 - alpha * tanh(i_nl ./ Isat).^2);
+
+% SECTION 4 - SOLVE LINEAR COMPARISON MODEL
+
+
+[t_lin, x_lin] = ode45(@(t,x) linear_rlc_ode(t, x, R, C, L0, Vstep), tspan, x0);
+
+i_lin  = x_lin(:,1);
+vC_lin = x_lin(:,2);
+
+% SECTION 5 - PLOTS: LINEAR VS NONLINEAR
+
+
+figure('Name','Part 4 Nonlinear Inductor Model','Color','w');
+
+subplot(3,1,1)
+plot(t_nl, i_nl, 'LineWidth', 2); hold on;
+plot(t_lin, i_lin, '--', 'LineWidth', 2);
+grid on;
+xlabel('Time (s)');
+ylabel('Current (A)');
+title('Current Response: Nonlinear vs Linear');
+legend('Nonlinear','Linear','Location','best');
+
+subplot(3,1,2)
+plot(t_nl, vC_nl, 'LineWidth', 2); hold on;
+plot(t_lin, vC_lin, '--', 'LineWidth', 2);
+grid on;
+xlabel('Time (s)');
+ylabel('Capacitor Voltage v_C (V)');
+title('Capacitor Voltage: Nonlinear vs Linear');
+legend('Nonlinear','Linear','Location','best');
+
+subplot(3,1,3)
+plot(i_nl, L_nl, 'LineWidth', 2);
+grid on;
+xlabel('Current (A)');
+ylabel('Inductance L(i) (H)');
+title('Nonlinear Inductance vs Current');
+
+% SECTION 6 - PARAMETER STUDY FOR Isat
+Isat_values = [0.2, 0.5, 1.0];
+figure('Color','w');
+hold on;
+
+i_plot = linspace(0,1.2,500);
+for Isat_k = [0.2 0.5 1.0]
+    L_plot = L0 * (1 - alpha * tanh(i_plot ./ Isat_k).^2);
+    plot(i_plot, L_plot, 'LineWidth', 2);
+end
+
+grid on;
+xlabel('Current (A)');
+ylabel('Inductance L(i) (H)');
+title('Inductance vs Current');
+legend('I_{sat}=0.2 A','I_{sat}=0.5 A','I_{sat}=1.0 A','Location','best');
+
+%% =========================================================================
+% SECTION 8 - COMMAND WINDOW SUMMARY
+
+
+fprintf('\n================ Nonlinear Inductor Part 4 Summary ================\n');
+fprintf('R      = %.2f Ohms\n', R);
+fprintf('C      = %.2e F\n', C);
+fprintf('L0     = %.4e H\n', L0);
+fprintf('alpha  = %.2f\n', alpha);
+fprintf('Isat   = %.2f A\n', Isat);
+fprintf('Vstep  = %.2f V\n', Vstep);
+fprintf('Minimum nonlinear inductance reached = %.4e H\n', min(L_nl));
+fprintf('Maximum nonlinear current reached    = %.4e A\n', max(i_nl));
+fprintf('Maximum capacitor voltage reached    = %.4e V\n', max(vC_nl));
+
+
+
+% LOCAL FUNCTIONS
+
+function dxdt = nonlinear_rlc_ode(~, x, R, C, L0, alpha, Isat, V)
+    % States
+    i  = x(1);
+    vC = x(2);
+
+    % Nonlinear inductance model
+    z = i / Isat;
+    L = L0 * (1 - alpha * tanh(z)^2);
+
+    % Derivative dL/di
+    dLdi = -(2 * L0 * alpha / Isat) * tanh(z) * (1 / cosh(z))^2;
+
+    % State equations
+    di_dt  = (V - R*i - vC) / (L + i*dLdi);
+    dvC_dt = i / C;
+
+    dxdt = [di_dt; dvC_dt];
+end
+
+function dxdt = linear_rlc_ode(~, x, R, C, L0, V)
+    % States
+    i  = x(1);
+    vC = x(2);
+
+    % Linear RLC model
+    di_dt  = (V - R*i - vC) / L0;
+    dvC_dt = i / C;
+
+    dxdt = [di_dt; dvC_dt];
+end
