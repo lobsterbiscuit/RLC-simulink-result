@@ -1,0 +1,400 @@
+%% =========================================================================
+% build_simulink_RLC_state_space_model_clean_v2.m
+%
+% Clean reset version:
+%   - Analytical ideal/FEM comparison
+%   - Builds ONLY the ideal Simscape RLC model
+%   - Uses DC Voltage Source (equivalent to a step at t = 0)
+%   - Uses conservative-port discovery that works when ports are split
+%     across LConn/RConn instead of assuming two RConn ports
+%% =========================================================================
+
+clear; clc; close all;
+
+%% =========================================================================
+% SECTION 1 — PHYSICAL PARAMETERS
+%% =========================================================================
+Rh      = 5e-3;
+N       = 10;
+p       = 1e-3;
+rw      = 0.5e-3;
+sigma   = 5.96e7;
+mu0     = 4*pi*1e-7;
+
+Aw      = pi * rw^2;
+L_wire  = N * 2 * pi * Rh;
+R_dc    = L_wire / (sigma * Aw);
+
+fprintf('=== Winding DC Parameters ===\n');
+fprintf('  Wire length : %.6f m\n', L_wire);
+fprintf('  R_dc        : %.6f Ohm (%.3f mOhm)\n', R_dc, R_dc*1e3);
+
+l_coil      = max((N-1)*p, eps);
+D_coil      = 2*Rh;
+L_wheeler   = (mu0 * N^2 * pi * Rh^2) / (l_coil + 0.9*Rh);
+L           = L_wheeler;
+
+fprintf('  L (Wheeler) : %.6e H (%.4f uH)\n', L, L*1e6);
+
+f_target = 1e6;
+C        = 1 / ((2*pi*f_target)^2 * L);
+
+fprintf('  C (external): %.6e F (%.4f nF)\n', C, C*1e9);
+
+R_crit  = 2 * sqrt(L / C);
+zeta    = R_crit / (2*sqrt(L/C));
+omega0  = 1 / sqrt(L*C);
+f0      = omega0 / (2*pi);
+
+fprintf('\n=== Critical Damping ===\n');
+fprintf('  R_critical  : %.6f Ohm\n', R_crit);
+fprintf('  zeta        : %.6f\n', zeta);
+fprintf('  omega0      : %.6f Mrad/s\n', omega0/1e6);
+fprintf('  f0          : %.6f MHz\n', f0/1e6);
+
+V_step = 1.0;
+
+%% =========================================================================
+% SECTION 2 — SIMPLE FEM-APPROX PARAMETERS FOR ANALYTICAL COMPARISON
+%% =========================================================================
+R_lead  = 50e-3;
+L_lead  = 10e-9;
+Hw      = 0.5;
+eps0    = 8.854e-12;
+C_shunt = eps0 * D_coil * Hw;
+
+fprintf('\n=== FEM Parasitics ===\n');
+fprintf('  R_lead      : %.6f Ohm (%.3f mOhm)\n', R_lead, R_lead*1e3);
+fprintf('  L_lead      : %.6e H (%.3f nH)\n', L_lead, L_lead*1e9);
+fprintf('  C_shunt     : %.6e F (%.4f pF)\n', C_shunt, C_shunt*1e12);
+
+%% =========================================================================
+% SECTION 3 — FOSTER PARAMETERS FOR ANALYTICAL BROADBAND CURVE
+%% =========================================================================
+Nf = 4;
+f_breaks = logspace(log10(f0/100), log10(f0*10), Nf);
+
+R_ac_target = zeros(1, Nf);
+for k = 1:Nf
+    R_ac_target(k) = R_dc * bessel_rac_ratio(f_breaks(k), rw, sigma);
+end
+
+R_foster = zeros(1, Nf);
+L_foster = zeros(1, Nf);
+R_prev = R_dc;
+for k = 1:Nf
+    R_foster(k) = max(R_ac_target(k) - R_prev, 0.05*R_dc);
+    L_foster(k) = R_foster(k) / (2*pi*f_breaks(k));
+    R_prev = R_ac_target(k);
+end
+
+fprintf('\n=== Foster Network (Nf=%d stages) ===\n', Nf);
+fprintf('  Stage   f_break(kHz)   R_k(mOhm)   L_k(nH)\n');
+for k = 1:Nf
+    fprintf('    %d      %10.3f    %10.4f   %10.4f\n', ...
+        k, f_breaks(k)/1e3, R_foster(k)*1e3, L_foster(k)*1e9);
+end
+
+%% =========================================================================
+% SECTION 4 — ANALYTICAL TIME RESPONSE
+%% =========================================================================
+fprintf('\n=== Running Analytical Simulation ===\n');
+tau_crit = 2*L / R_crit;
+t_end    = 10 * tau_crit;
+dt       = t_end / 5000;
+t        = 0:dt:t_end;
+
+alpha    = R_crit/(2*L);
+Vc_ideal = V_step * (1 - exp(-alpha*t) .* (1 + alpha*t));
+iL_ideal = V_step * (omega0^2 / (R_crit/L)) * t .* exp(-alpha*t);
+
+R_ac_f0 = R_dc * bessel_rac_ratio(f0, rw, sigma);
+R_total = R_crit + R_lead + R_ac_f0;
+L_total = L + L_lead;
+C_eff   = C + 0.05*C_shunt;
+zeta_fem = R_total / (2*sqrt(L_total/C_eff));
+
+fprintf('  R_ac at f0  : %.6f Ohm (%.3f mOhm)\n', R_ac_f0, R_ac_f0*1e3);
+fprintf('  R_total FEM : %.6f Ohm\n', R_total);
+fprintf('  L_total FEM : %.6e H (%.4f uH)\n', L_total, L_total*1e6);
+fprintf('  zeta_FEM    : %.6f (%s)\n', zeta_fem, zeta_fem_str(zeta_fem));
+
+deriv_fem = @(x) [ ...
+    (V_step - R_total*x(1) - x(2))/L_total; ...
+    x(1)/C_eff ];
+
+x = [0;0];
+Vc_fem = zeros(size(t));
+iL_fem = zeros(size(t));
+for i = 1:length(t)
+    Vc_fem(i) = x(2);
+    iL_fem(i) = x(1);
+    k1 = deriv_fem(x);
+    k2 = deriv_fem(x + dt/2*k1);
+    k3 = deriv_fem(x + dt/2*k2);
+    k4 = deriv_fem(x + dt*k3);
+    x  = x + dt/6*(k1 + 2*k2 + 2*k3 + k4);
+end
+
+%% =========================================================================
+% SECTION 5 — IMPEDANCE SWEEP
+%% =========================================================================
+f_sweep = logspace(4, 9, 600);
+Z_ideal = zeros(size(f_sweep));
+Z_fem   = zeros(size(f_sweep));
+for i = 1:length(f_sweep)
+    f = f_sweep(i);
+    w = 2*pi*f;
+    Z_ideal(i) = abs(R_crit + 1j*w*L - 1j/(w*C));
+    Z_ld   = R_lead + 1j*w*L_lead;
+    Rac_f  = R_dc * bessel_rac_ratio(f, rw, sigma);
+    Z_wind = Rac_f + 1j*w*L;
+    Z_sh   = 1/(1j*w*C_shunt);
+    Z_par  = (Z_wind * Z_sh) / (Z_wind + Z_sh);
+    Z_tot  = Z_ld + Z_par + 1/(1j*w*C);
+    Z_fem(i) = abs(Z_tot);
+end
+
+%% =========================================================================
+% SECTION 6 — PLOTS
+%% =========================================================================
+figure('Name','RLC: Ideal vs FEM Model','Color','w','Position',[50 50 1200 900]);
+c_ideal = [0.0 0.65 0.95];
+c_fem   = [1.0 0.42 0.21];
+
+subplot(3,2,[1 2]);
+t_us = t * 1e6;
+plot(t_us, Vc_ideal, '-', 'Color', c_ideal, 'LineWidth', 2.5); hold on;
+plot(t_us, Vc_fem,   '-', 'Color', c_fem,   'LineWidth', 2.0);
+xlabel('Time (us)'); ylabel('V_C (V)');
+title('Step Response — Capacitor Voltage');
+legend(sprintf('Ideal, zeta = %.3f', zeta), sprintf('FEM, zeta = %.3f', zeta_fem), 'Location', 'southeast');
+grid on; box on;
+
+subplot(3,2,[3 4]);
+plot(t_us, iL_ideal*1e3, '-', 'Color', c_ideal, 'LineWidth', 2.5); hold on;
+plot(t_us, iL_fem*1e3,   '-', 'Color', c_fem,   'LineWidth', 2.0);
+xlabel('Time (us)'); ylabel('i_L (mA)');
+title('Inductor Current');
+legend('Ideal','FEM','Location','northeast');
+grid on; box on;
+
+subplot(3,2,5);
+loglog(f_sweep, Z_ideal, '-', 'Color', c_ideal, 'LineWidth', 2.5); hold on;
+loglog(f_sweep, Z_fem,   '-', 'Color', c_fem,   'LineWidth', 2.0);
+xlabel('Frequency (Hz)'); ylabel('|Z| (Ohm)');
+title('Impedance Magnitude');
+legend('Ideal','FEM','Location','northwest');
+grid on; box on;
+
+subplot(3,2,6);
+f_val = logspace(3, 8, 500);
+Z_foster_val = zeros(size(f_val));
+Z_bessel_val = zeros(size(f_val));
+for i = 1:length(f_val)
+    f = f_val(i); w = 2*pi*f; Zf = 0;
+    for k = 1:Nf
+        Zk = (R_foster(k) * 1j*w*L_foster(k)) / (R_foster(k) + 1j*w*L_foster(k));
+        Zf = Zf + Zk;
+    end
+    Z_foster_val(i) = real(Zf);
+    Z_bessel_val(i) = R_dc * bessel_rac_ratio(f, rw, sigma);
+end
+semilogx(f_val, Z_bessel_val*1e3, '-', 'Color', c_ideal, 'LineWidth', 2.5); hold on;
+semilogx(f_val, Z_foster_val*1e3, '--', 'Color', c_fem, 'LineWidth', 2.0);
+scatter(f_breaks, R_ac_target*1e3, 60, c_fem, 'filled');
+xlabel('Frequency (Hz)'); ylabel('R_{ac} (mOhm)');
+title(sprintf('Foster Fit (N = %d)', Nf));
+legend('Exact Bessel','Foster fit','Breakpoints','Location','northwest');
+grid on; box on;
+sgtitle('Series RLC — Ideal vs FEM Broadband Approximation');
+
+%% =========================================================================
+% SECTION 7 — BUILD IDEAL SIMSCAPE MODEL ONLY
+%% =========================================================================
+fprintf('\n=== Building ideal Simscape model only ===\n');
+if ~license('test','Simulink'), error('Simulink license not found.'); end
+if ~license('test','Simscape'), error('Simscape license not found.'); end
+
+libroot = find_sc_lib();
+ELREF   = sc(libroot, 'Electrical/Electrical Elements/Electrical Reference');
+RESIST  = sc(libroot, 'Electrical/Electrical Elements/Resistor');
+INDUCT  = sc(libroot, 'Electrical/Electrical Elements/Inductor');
+CAPAC   = sc(libroot, 'Electrical/Electrical Elements/Capacitor');
+VSRC    = sc(libroot, 'Electrical/Electrical Sources/DC Voltage Source');
+SOLVCFG = 'nesl_utility/Solver Configuration';
+
+fprintf('  Simscape library root: %s\n', libroot);
+
+model_ideal = 'rlc_ideal_model_clean_v2';
+if bdIsLoaded(model_ideal), close_system(model_ideal, 0); end
+new_system(model_ideal);
+open_system(model_ideal);
+set_param(model_ideal, 'StopTime', num2str(t_end), 'Solver', 'ode23t', 'MaxStep', num2str(dt*10), 'RelTol', '1e-6', 'AbsTol', '1e-9');
+sys = model_ideal;
+
+ab(sys, SOLVCFG, 'SolverConfig', [40 30 180 70]);
+ab(sys, VSRC,    'Vstep',        [240 135 320 225]);
+ab(sys, RESIST,  'Rcrit',        [400 165 470 205]);
+ab(sys, INDUCT,  'Lideal',       [540 165 620 205]);
+ab(sys, CAPAC,   'Cseries',      [680 165 750 205]);
+ab(sys, ELREF,   'GND',          [320 320 360 350]);
+
+safe_set_param([sys '/Vstep'],   {'v0','V0','v','V','constantvoltage'}, V_step);
+safe_set_param([sys '/Rcrit'],   {'r','R','resistance','Resistance'}, R_crit);
+safe_set_param([sys '/Lideal'],  {'l','L','inductance','Inductance'}, L);
+safe_set_param([sys '/Cseries'], {'c','C','capacitance','Capacitance'}, C);
+
+ph_solver = get_param([sys '/SolverConfig'], 'PortHandles');
+ph_vstep  = get_param([sys '/Vstep'],        'PortHandles');
+ph_rcrit  = get_param([sys '/Rcrit'],        'PortHandles');
+ph_lideal = get_param([sys '/Lideal'],       'PortHandles');
+ph_cseries= get_param([sys '/Cseries'],      'PortHandles');
+ph_gnd    = get_param([sys '/GND'],          'PortHandles');
+
+fprintf('\nPort handles for Vstep:\n');
+disp(ph_vstep);
+
+h_solver = first_available_port(ph_solver, {'RConn','LConn'});
+
+v_cons = all_conserving_ports(ph_vstep);
+if numel(v_cons) < 2
+    error('DC Voltage Source does not expose two electrical conserving ports.');
+end
+h_vplus  = v_cons(1);
+h_vminus = v_cons(2);
+
+r_cons = all_conserving_ports(ph_rcrit);
+l_cons = all_conserving_ports(ph_lideal);
+c_cons = all_conserving_ports(ph_cseries);
+g_cons = all_conserving_ports(ph_gnd);
+
+if numel(r_cons) < 2 || numel(l_cons) < 2 || numel(c_cons) < 2 || isempty(g_cons)
+    error('One or more passive blocks did not expose the expected conserving ports.');
+end
+
+h_r_l = r_cons(1); h_r_r = r_cons(2);
+h_l_l = l_cons(1); h_l_r = l_cons(2);
+h_c_l = c_cons(1); h_c_r = c_cons(2);
+h_gnd = g_cons(1);
+
+connect_ports(sys, h_solver, h_vplus);
+connect_ports(sys, h_vplus,  h_r_l);
+connect_ports(sys, h_r_r,    h_l_l);
+connect_ports(sys, h_l_r,    h_c_l);
+connect_ports(sys, h_c_r,    h_gnd);
+connect_ports(sys, h_vminus, h_gnd);
+
+save_system(model_ideal);
+fprintf('  Saved: %s.slx\n', model_ideal);
+fprintf('\nIdeal Simscape model created.\n');
+
+%% =========================================================================
+% LOCAL FUNCTIONS
+%% =========================================================================
+function ratio = bessel_rac_ratio(f, rw, sigma)
+    mu0_l = 4*pi*1e-7;
+    delta = sqrt(1/(pi*f*mu0_l*sigma));
+    xi = rw/delta;
+    if xi < 0.5
+        ratio = 1 + xi^4/48;
+    elseif xi > 20
+        ratio = xi/2 + 3/(64*xi);
+    else
+        arg = xi*sqrt(1j);
+        ratio = real(arg * besselj(0,arg) / (2*besselj(1,arg)*sqrt(1j)));
+    end
+end
+
+function s = zeta_fem_str(z)
+    if z < 1 - 1e-9
+        s = 'underdamped';
+    elseif abs(z - 1) <= 1e-9
+        s = 'critically damped';
+    else
+        s = 'overdamped';
+    end
+end
+
+function libroot = find_sc_lib()
+    candidates = {'fl_lib', 'foundation_library'};
+    libroot = '';
+    for i = 1:numel(candidates)
+        try
+            load_system(candidates{i});
+            libroot = candidates{i};
+            return;
+        catch
+        end
+    end
+    error('Could not load Simscape Foundation library root.');
+end
+
+function pathstr = sc(libroot, subpath)
+    pathstr = [libroot '/' subpath];
+end
+
+function blk = ab(sys, lib, name, pos, varargin)
+    dst = [sys '/' name];
+    blk = add_block(lib, dst, 'Position', pos);
+    if ~isempty(varargin)
+        for k = 1:2:numel(varargin)
+            set_param(blk, varargin{k}, varargin{k+1});
+        end
+    end
+end
+
+function connect_ports(sys, srcHandle, dstHandle)
+    add_line(sys, srcHandle, dstHandle, 'autorouting', 'smart');
+end
+
+function safe_set_param(blockPath, candidateNames, value)
+    if isnumeric(value)
+        valueStr = num2str(value, '%.16g');
+    else
+        valueStr = char(value);
+    end
+    dp = get_param(blockPath, 'DialogParameters');
+    names = fieldnames(dp);
+    for i = 1:numel(candidateNames)
+        if any(strcmp(candidateNames{i}, names))
+            set_param(blockPath, candidateNames{i}, valueStr);
+            return;
+        end
+    end
+    for i = 1:numel(candidateNames)
+        idx = find(strcmpi(candidateNames{i}, names), 1);
+        if ~isempty(idx)
+            set_param(blockPath, names{idx}, valueStr);
+            return;
+        end
+    end
+    fprintf('\nBlock: %s\n', blockPath);
+    fprintf('Available DialogParameters:\n');
+    disp(names);
+    error('Could not find a matching parameter for block: %s', blockPath);
+end
+
+function h = first_available_port(ph, groups)
+    for k = 1:numel(groups)
+        g = groups{k};
+        if isfield(ph, g) && ~isempty(ph.(g))
+            h = ph.(g)(1);
+            return;
+        end
+    end
+    disp(ph);
+    error('Could not find an available port handle from the requested groups.');
+end
+
+function cons = all_conserving_ports(ph)
+    cons = [];
+    if isfield(ph, 'LConn') && ~isempty(ph.LConn)
+        cons = [cons; ph.LConn(:)];
+    end
+    if isfield(ph, 'RConn') && ~isempty(ph.RConn)
+        cons = [cons; ph.RConn(:)];
+    end
+    cons = unique(cons, 'stable');
+end
+
